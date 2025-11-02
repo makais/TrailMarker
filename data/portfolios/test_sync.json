@@ -1,0 +1,11 @@
+{
+  "MSFT": {
+    "date_purch": "2024-01-16",
+    "price_purch": 385.2563171386719,
+    "stop_pct": 12.0
+  },
+  "email": {
+    "address": "",
+    "frequency": 3
+  }
+}

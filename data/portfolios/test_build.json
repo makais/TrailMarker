@@ -1,0 +1,11 @@
+{
+  "AAPL": {
+    "date_purch": "2024-01-16",
+    "price_purch": 182.08837890625,
+    "stop_pct": 15.0
+  },
+  "email": {
+    "address": "",
+    "frequency": 3
+  }
+}
