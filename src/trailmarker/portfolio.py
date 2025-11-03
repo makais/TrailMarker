@@ -61,6 +61,39 @@ class Portfolio:
         self._dirty: bool = False
 
     @classmethod
+    def exists(cls, name: str, json_dir: Optional[Path] = None) -> bool:
+        """
+        Check if a portfolio exists and is valid JSON.
+
+        Args:
+            name: Name of the portfolio (without .json extension)
+            json_dir: Optional directory containing JSON files
+
+        Returns:
+            True if portfolio file exists and contains valid JSON, False otherwise
+
+        Example:
+            >>> if Portfolio.exists('my_portfolio'):
+            ...     p = Portfolio.load('my_portfolio')
+            ... else:
+            ...     print("Portfolio not found")
+        """
+        json_path = Path(json_dir) if json_dir else Path.cwd() / 'json'
+        filename = json_path / f'{name}.json'
+
+        # Check if file exists
+        if not filename.exists():
+            return False
+
+        # Check if file is valid JSON
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                json.load(f)
+            return True
+        except (json.JSONDecodeError, IOError):
+            return False
+
+    @classmethod
     def load(cls, name: str, json_dir: Optional[Path] = None) -> Portfolio:
         """
         Load an existing portfolio from JSON file.
@@ -159,12 +192,110 @@ class Portfolio:
         return portfolios
 
     @classmethod
+    def load_or_create(
+        cls,
+        name: str,
+        form_data: Dict[str, Any],
+        json_dir: Optional[Path] = None,
+        max_rows: int = 5,
+        merge_stocks: bool = True
+    ) -> Portfolio:
+        """
+        Load existing portfolio or create new one if it doesn't exist.
+
+        This is the recommended method for typical workflows where you want to
+        either load an existing portfolio or create a new one with the same name.
+
+        Args:
+            name: Name of the portfolio
+            form_data: Dictionary with keys like 'ticker1', 'purchase_date1', etc.
+            json_dir: Optional directory for JSON storage
+            max_rows: Maximum number of stock rows to process (default 5)
+            merge_stocks: If True and portfolio exists, add new stocks to it.
+                         If False, warn and return existing portfolio unchanged.
+
+        Returns:
+            Portfolio instance (existing or newly created)
+
+        Example:
+            >>> # First time - creates new portfolio
+            >>> p = Portfolio.load_or_create('tech_stocks', form_data)
+            >>> p.save()
+            >>>
+            >>> # Second time - loads existing and adds new stocks
+            >>> p = Portfolio.load_or_create('tech_stocks', more_stocks)
+            >>> p.save()
+        """
+        if cls.exists(name, json_dir):
+            # Portfolio already exists
+            portfolio = cls.load(name, json_dir)
+
+            if merge_stocks:
+                # Add new stocks from form_data to existing portfolio
+                portfolio.add_stocks(form_data, max_rows)
+            else:
+                warnings.warn(
+                    f"Portfolio '{name}' already exists. "
+                    f"Set merge_stocks=True to add new stocks, or use load() directly."
+                )
+
+            return portfolio
+        else:
+            # Create new portfolio
+            return cls.create(name, form_data, json_dir, max_rows)
+
+    @classmethod
+    def create_empty(
+        cls,
+        name: str,
+        json_dir: Optional[Path] = None,
+        overwrite: bool = False
+    ) -> Portfolio:
+        """
+        Create an empty portfolio (no stocks).
+
+        Useful for agent workflows where stocks will 
+        be added from commands rather than form data.
+
+        Args:
+            name: Name for this portfolio
+            json_dir: Optional directory for JSON storage
+            overwrite: If True, allow overwriting existing portfolio.
+                       If False (default), raise error if portfolio exists.
+        
+        Returns:
+            New empty Portfolio instance (not yet saved to disk)
+
+        Raises:
+            FileExistsError: If portfolio exists and overwrite=False
+        
+        Example:
+            >>> p = Portfolio.create_empty("tech_stocks")
+            >>> p.add_stocks(...) # Add via agent workflow presumably
+            >>> p.save()
+
+        """
+        # Check if portfolio already exists
+        if cls.exists(name, json_dir) and not overwrite:
+            raise FileExistsError(
+                f"Portfolio '{name}' already exists. "
+                f"Use overwrite=True to replace it, or use load() instead."
+            )
+
+        # Create empty portfolio data
+        empty_data = {"email": {"address": "", "frequency": None}}
+        portfolio = cls(name, empty_data, json_dir)
+        portfolio._dirty = True  # ← ADD THIS LINE
+        return portfolio
+        
+    @classmethod
     def create(
         cls,
         name: str,
         form_data: Dict[str, Any],
         json_dir: Optional[Path] = None,
-        max_rows: int = 5
+        max_rows: int = 5,
+        overwrite: bool = False
     ) -> Portfolio:
         """
         Create a new portfolio from form data.
@@ -174,10 +305,25 @@ class Portfolio:
             form_data: Dictionary with keys like 'ticker1', 'purchase_date1', etc.
             json_dir: Optional directory for JSON storage
             max_rows: Maximum number of stock rows to process (default 5)
+            overwrite: If True, allow overwriting existing portfolio.
+                      If False (default), raise error if portfolio exists.
 
         Returns:
             New Portfolio instance (not yet saved to disk)
+
+        Raises:
+            FileExistsError: If portfolio with this name already exists and overwrite=False
+
+        Note:
+            Consider using load_or_create() for typical workflows instead.
         """
+        # Check if portfolio already exists
+        if cls.exists(name, json_dir) and not overwrite:
+            raise FileExistsError(
+                f"Portfolio '{name}' already exists. "
+                f"Use overwrite=True to replace it, or use load_or_create() to merge stocks."
+            )
+
         portfolio_data: Dict[str, Any] = {}
         existing_tickers = set()
 
@@ -227,25 +373,86 @@ class Portfolio:
         self.email = reloaded.email
         self._dirty = False
 
-    def add_stocks(self, form_data: Dict[str, Any], max_rows: int = 3) -> None:
+    def add_stocks(
+        self,
+        form_data: Dict[str, Any],
+        max_rows: int = 3,
+        skip_duplicates: bool = True,
+        overwrite_duplicates: bool = False
+    ) -> Dict[str, List[str]]:
         """
         Add stocks to the portfolio from form data.
 
         Args:
             form_data: Dictionary with keys like 'ticker1', 'purchase_date1', etc.
             max_rows: Maximum number of rows to process (default 3)
+            skip_duplicates: If True, silently skip stocks that already exist.
+                           If False, warn about duplicates (default True for backward compat)
+            overwrite_duplicates: If True, replace existing stock entries.
+                                 If False, respect skip_duplicates setting.
+                                 Note: Without quantity/lot tracking, this replaces the
+                                 entire position (purchase date, price, stop %).
+
+        Returns:
+            Dictionary with 'added', 'skipped', and 'overwritten' ticker lists
+
+        Raises:
+            ValueError: If ticker already exists and both skip_duplicates=False
+                       and overwrite_duplicates=False
+
+        Note:
+            Until quantity/lot tracking is implemented, each ticker can only
+            have one position. Use overwrite_duplicates=True to update an
+            existing position's purchase date, price, or stop percentage.
         """
         existing_tickers = set(self.portfolio.keys())
+        added: List[str] = []
+        skipped: List[str] = []
+        overwritten: List[str] = []
 
         # Process each row
         for n in range(1, max_rows + 1):
             ticker = form_data.get(f'ticker{n}', '').strip().upper()
 
-            if ticker and ticker not in existing_tickers:
+            if not ticker:
+                continue
+
+            # Check if ticker already exists
+            if ticker in existing_tickers:
+                if overwrite_duplicates:
+                    # Replace existing position
+                    row_ticker, portfolio_row = self._scrub_row(form_data, n)
+                    if row_ticker:
+                        self.portfolio[row_ticker] = portfolio_row
+                        overwritten.append(row_ticker)
+                        warnings.warn(
+                            f"Overwriting existing position for {ticker}. "
+                            f"Original purchase data has been replaced."
+                        )
+                elif skip_duplicates:
+                    # Silently skip
+                    skipped.append(ticker)
+                else:
+                    # Raise error
+                    raise ValueError(
+                        f"Stock {ticker} already exists in portfolio. "
+                        f"Use overwrite_duplicates=True to replace it, or "
+                        f"skip_duplicates=True to ignore duplicates."
+                    )
+            else:
+                # Add new stock
                 row_ticker, portfolio_row = self._scrub_row(form_data, n)
                 if row_ticker:
                     self.portfolio[row_ticker] = portfolio_row
                     existing_tickers.add(row_ticker)
+                    added.append(row_ticker)
+
+        # Warn about skipped duplicates if any
+        if skipped and not skip_duplicates:
+            warnings.warn(
+                f"Skipped existing stocks: {', '.join(skipped)}. "
+                f"Use overwrite_duplicates=True to replace them."
+            )
 
         # Update email if provided
         if form_data.get('email'):
@@ -254,7 +461,14 @@ class Portfolio:
         elif self.email.get('address'):
             self.email['frequency'] = form_data.get('frequency', 3)
 
-        self._dirty = True
+        if added or overwritten:
+            self._dirty = True
+
+        return {
+            'added': added,
+            'skipped': skipped,
+            'overwritten': overwritten
+        }
 
     def remove_stocks(self, tickers: List[str]) -> None:
         """

@@ -21,8 +21,8 @@ def route_by_intent(state: PortfolioAgentState) -> str:
         return "handle_add"
     elif intent == "remove":
         return "handle_remove"
-    elif intent == "save":
-        return "handle_save"
+    elif intent == "load":
+        return "handle_load"
     else:
         return "handle_unknown"
 
@@ -43,8 +43,9 @@ def create_graph():
         "handle_query": nodes.handle_query,
         "handle_add": nodes.handle_add,
         "handle_remove": nodes.handle_remove,
-        "handle_save": nodes.handle_save,
         "handle_unknown": nodes.handle_unknown,
+        "handle_load": nodes.handle_load,
+        "finalize": nodes.finalize,  # cleanup node
     }
 
     # Add all nodes
@@ -62,15 +63,18 @@ def create_graph():
             "handle_query": "handle_query",
             "handle_add": "handle_add",
             "handle_remove": "handle_remove",
-            "handle_save": "handle_save",
+            "handle_load": "handle_load",
             "handle_unknown": "handle_unknown"
         }
     )
 
-    # All handlers go to END
+    # All handlers go to finalize
     for name in handlers:
-        if name != "classify_intent":
-            graph.add_edge(name, END)
+        if name not in ("classify_intent", "finalize"):
+            graph.add_edge(name, "finalize")
+
+    # Finalize goes to END
+    graph.add_edge("finalize", END)
 
     # Compile and return
     return graph.compile()
